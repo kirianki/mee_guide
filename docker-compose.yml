@@ -1,0 +1,127 @@
+services:
+  # ── Reverse Proxy ────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot-certs:/etc/letsencrypt:ro
+    depends_on:
+      - guide-registry
+      - inference
+      - dashboard-api
+      - dashboard-web
+    restart: unless-stopped
+
+  # ── Backend Services ─────────────────────────────────────────────────────────
+  guide-registry:
+    build:
+      context: ./services/guide-registry
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  inference:
+    build:
+      context: ./services/inference
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PORT=8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard-api:
+    build:
+      context: ./services/dashboard-api
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - PORT=8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery Crawler ───────────────────────────────────────────────────────────
+  crawler:
+    build:
+      context: ./services/crawler
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Publisher Dashboard (Next.js) ────────────────────────────────────────────
+  dashboard-web:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    env_file: .env
+    restart: unless-stopped
+
+  # ── Data Layer ───────────────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg15
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./services/migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    env_file: .env
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9001:9001"   # MinIO console (dev only)
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  certbot-certs:
