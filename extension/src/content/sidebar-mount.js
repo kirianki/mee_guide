@@ -2,10 +2,12 @@
 import browser from '../shared/browser.js';
 import { h, render } from 'preact';
 import App from '../sidebar/App.jsx';
+import { showSpotlight, hideSpotlight } from './spotlight.js';
 
 let shadowRoot = null;
 let appContainer = null;
 
+/** Called once on page load */
 export function mountSidebar() {
     const host = document.createElement('div');
     host.id = 'webguide-sidebar-host';
@@ -14,43 +16,47 @@ export function mountSidebar() {
 
     shadowRoot = host.attachShadow({ mode: 'closed' });
 
-    // Inject global animations and keyframes into Shadow DOM
     const style = document.createElement('style');
     style.textContent = `
         @keyframes wg-spin { to { transform: rotate(360deg); } }
         @keyframes wg-pulse {
-            0% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0.4); }
-            70% { box-shadow: 0 0 0 10px rgba(99, 102, 241, 0); }
-            100% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0); }
+            0%, 100% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0.4); opacity: 1; }
+            50% { box-shadow: 0 0 0 10px rgba(99, 102, 241, 0); opacity: 0.7; }
         }
         @keyframes wg-fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
+            from { opacity: 0; transform: translateY(8px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
     `;
     shadowRoot.appendChild(style);
 
     appContainer = document.createElement('div');
     shadowRoot.appendChild(appContainer);
 
+    renderApp({ guides: [], loading: true });
+}
+
+/** Called whenever the background sends new guide data */
+export function updateSidebar(response) {
+    if (!appContainer) return;
+    renderApp({ guides: response?.guides ?? [], loading: false });
+}
+
+function renderApp(props) {
     render(
         h(App, {
-            guides: [],
-            loading: false,
-            onSendChat: (text) => browser.runtime.sendMessage({ type: 'CHAT_MESSAGE', text })
+            ...props,
+            onSendChat: sendChatMessage,
+            onHighlight: (selector, label) => showSpotlight(selector, label),
         }),
         appContainer
     );
 }
 
-export function updateSidebar(response) {
-    if (!appContainer) return;
-    render(
-        h(App, {
-            guides: response?.guides ?? [],
-            loading: false,
-            onSendChat: (text) => browser.runtime.sendMessage({ type: 'CHAT_MESSAGE', text })
-        }),
-        appContainer
-    );
+async function sendChatMessage(text) {
+    return browser.runtime.sendMessage({ type: 'CHAT_MESSAGE', text });
 }

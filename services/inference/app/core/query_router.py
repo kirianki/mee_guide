@@ -38,6 +38,19 @@ async def get_redis():
     return _redis
 
 
+def _trim_snapshot(snapshot: dict) -> dict:
+    """Trim snapshot fields to prevent token overload with the richer v2 payload."""
+    s = dict(snapshot)
+    s["buttons"] = (s.get("buttons") or [])[:20]
+    s["formFields"] = (s.get("formFields") or [])[:20]
+    s["headings"] = (s.get("headings") or [])[:20]
+    s["categories"] = (s.get("categories") or [])[:20]
+    s["topLinks"] = (s.get("topLinks") or [])[:15]
+    # Structured data can be huge JSON-LD blobs — exclude entirely
+    s.pop("structuredData", None)
+    return s
+
+
 async def route_inference(request: dict) -> dict:
     """
     5-step routing decision tree.
@@ -75,8 +88,11 @@ async def route_inference(request: dict) -> dict:
 
     grounding = None  # TODO: pgvector SII semantic search (Section 7.2.2)
 
+    # Trim snapshot to prevent token overload with the richer v2 payload
+    trimmed = _trim_snapshot(snapshot)
+
     try:
-        result, provider = await run_inference(snapshot, history, grounding, tier)
+        result, provider = await run_inference(trimmed, history, grounding, tier)
     except RuntimeError:
         # Both providers failed — return a graceful degraded response
         result = {

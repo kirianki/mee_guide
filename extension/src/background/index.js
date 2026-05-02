@@ -10,14 +10,13 @@ const tabState = new Map();
 // ── Message Router ────────────────────────────────────────────────────────────
 browser.runtime.onMessage.addListener((message, sender) => {
     const { type, ...payload } = message;
-    switch (type) {
-        case 'PAGE_LOADED': handlePageLoaded(sender.tab.id, payload); break;
-        case 'PAGE_NAVIGATED': handlePageNavigated(sender.tab.id, payload); break;
-        case 'STEP_COMPLETED': handleStepCompleted(sender.tab.id, payload); break;
-        case 'CHAT_MESSAGE': handleChatMessage(sender.tab.id, payload); break;
-        default: console.warn('[WebGuide BG] Unknown message type:', type);
-    }
-    return true;
+    const tabId = sender.tab ? sender.tab.id : null;
+
+    if (type === 'PAGE_LOADED') handlePageLoaded(tabId, payload);
+    else if (type === 'PAGE_NAVIGATED') handlePageNavigated(tabId, payload);
+    else if (type === 'STEP_COMPLETED') handleStepCompleted(tabId, payload);
+    else if (type === 'CHAT_MESSAGE') handleChatMessage(tabId, payload);
+    else console.warn('[WebGuide BG] Unknown message type:', type);
 });
 
 async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) {
@@ -43,11 +42,26 @@ async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) 
                     publisher: null,
                     language: 'en',
                     personaTags: [],
+                    suggestedIntents: inferred.suggestedIntents || [],
                     steps: inferred.steps,
                     ttlSeconds: 300,
                 }],
                 indexEntry: null,
                 cacheHit: inferred.cacheHit,
+                requiresInference: false,
+            };
+        } else {
+            // Fallback guide if AI is down or timeout
+            response = {
+                guides: [{
+                    id: 'fallback-unavailable',
+                    tier: 'ai_index',
+                    title: 'Guidance Unavailable',
+                    steps: [{
+                        stepIndex: 0,
+                        instruction: 'AI guidance is currently unavailable. Please check your network or try again later.',
+                    }],
+                }],
                 requiresInference: false,
             };
         }
@@ -120,6 +134,9 @@ async function fetchGuides({ domain, url, snapshotHash }) {
 }
 
 async function fetchInference({ snapshot, sessionId, conversationHistory = [] }) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000); // 20s hard timeout
+
     try {
         const res = await fetch(`${API_BASE}/inference`, {
             method: 'POST',
@@ -130,12 +147,15 @@ async function fetchInference({ snapshot, sessionId, conversationHistory = [] })
                 lang: navigator.language?.slice(0, 2) || 'en',
                 conversationHistory,
             }),
+            signal: controller.signal,
         });
         if (!res.ok) throw new Error(`Inference API ${res.status}`);
         return await res.json();
     } catch (err) {
         console.error('[WebGuide BG] Inference failed:', err);
         return null;
+    } finally {
+        clearTimeout(timeout);
     }
 }
 
