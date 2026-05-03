@@ -23,7 +23,7 @@ async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) 
     // L1 cache — same snapshot hash means page hasn't changed
     const cached = tabState.get(tabId);
     if (cached && cached.snapshotHash === snapshotHash && cached.response) {
-        sendToTab(tabId, { type: 'GUIDE_RESPONSE', response: cached.response });
+        sendToTab(tabId, { type: 'GUIDE_RESPONSE', response: { ...cached.response, pageChain: cached.pageChain } });
         return;
     }
 
@@ -32,7 +32,8 @@ async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) 
 
     // Step 2: Inference Pipeline — only called on total cache miss
     if (response.requiresInference && snapshot) {
-        const inferred = await fetchInference({ snapshot, sessionId: String(tabId), snapshotHash });
+        const history = cached?.conversationHistory || [];
+        const inferred = await fetchInference({ snapshot, sessionId: String(tabId), snapshotHash, conversationHistory: history });
         if (inferred) {
             response = {
                 guides: [{
@@ -45,13 +46,26 @@ async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) 
                     suggestedIntents: inferred.suggestedIntents || [],
                     steps: inferred.steps,
                     ttlSeconds: 300,
+                    provider: inferred.provider,
+                    confidence: inferred.confidence,
                 }],
                 indexEntry: null,
                 cacheHit: inferred.cacheHit,
                 requiresInference: false,
             };
+
+            // Auto-save high-confidence workflows
+            if (inferred.confidence >= 0.75 && snapshotHash) {
+                saveWorkflow({
+                    guideTitle: inferred.guideTitle,
+                    steps: inferred.steps,
+                    snapshotHash,
+                    domain,
+                    urlPath: url,
+                    confidence: inferred.confidence,
+                });
+            }
         } else {
-            // Fallback guide if AI is down or timeout
             response = {
                 guides: [{
                     id: 'fallback-unavailable',
@@ -67,8 +81,46 @@ async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) 
         }
     }
 
-    tabState.set(tabId, { snapshot, domain, url, snapshotHash, response, spaState: { completedSteps: [] } });
-    sendToTab(tabId, { type: 'GUIDE_RESPONSE', response });
+    // Update page chain
+    const prevState = tabState.get(tabId);
+    const pageChain = prevState?.pageChain || [];
+    const guide = response.guides?.[0];
+    const lastEntry = pageChain[pageChain.length - 1];
+
+    // Append to chain if this is a new page (different URL)
+    if (!lastEntry || lastEntry.url !== url) {
+        pageChain.push({
+            url,
+            title: guide?.title || document?.title || url,
+            stepsCount: guide?.steps?.length || 0,
+        });
+    } else {
+        // Update last entry with fresh data
+        pageChain[pageChain.length - 1].stepsCount = guide?.steps?.length || 0;
+        if (guide?.title) pageChain[pageChain.length - 1].title = guide.title;
+    }
+
+    tabState.set(tabId, {
+        snapshot,
+        domain,
+        url,
+        snapshotHash,
+        response,
+        pageChain: pageChain.slice(-10), // Keep last 10 pages
+        spaState: { completedSteps: [] },
+        conversationHistory: prevState?.conversationHistory || [],
+    });
+
+    sendToTab(tabId, { type: 'GUIDE_RESPONSE', response: { ...response, pageChain: pageChain.slice(-10) } });
+
+    // PROACTIVE CHAT: If there is an active conversation, auto-trigger a context update
+    if (prevState?.conversationHistory?.length > 0 && response.guides?.[0]?.tier !== 'verified') {
+        console.log('[WebGuide BG] Proactive navigation update triggered.');
+        handleChatMessage(tabId, {
+            text: `(System: User navigated to ${url}. The new page is "${guide?.title || 'Unknown'}". Please provide the next step or options in the context of our goal.)`,
+            isSystem: true
+        });
+    }
 }
 
 function handlePageNavigated(tabId, { url }) {
@@ -81,20 +133,51 @@ function handleStepCompleted(tabId, { stepIndex }) {
     if (s) tabState.set(tabId, { ...s, spaState: { completedSteps: [...(s.spaState?.completedSteps || []), stepIndex] } });
 }
 
-async function handleChatMessage(tabId, { text }) {
+async function handleChatMessage(tabId, { text, isSystem = false }) {
     const state = tabState.get(tabId);
     if (!state) return;
 
+    // Handle save workflow trigger from UI
+    if (text === '__SAVE_WORKFLOW__') {
+        const guide = state.response?.guides?.[0];
+        if (guide && state.snapshotHash) {
+            await saveWorkflow({
+                guideTitle: guide.title,
+                steps: guide.steps,
+                snapshotHash: state.snapshotHash,
+                domain: state.domain,
+                urlPath: state.url,
+                confidence: guide.confidence || 0.8,
+            });
+            sendToTab(tabId, {
+                type: 'GUIDE_RESPONSE',
+                response: {
+                    ...state.response,
+                    pageChain: state.pageChain,
+                    _workflowSaved: true,
+                },
+            });
+        }
+        return;
+    }
+
     // Add to local history
-    const history = state.conversationHistory || [];
-    history.push({ role: 'user', content: text });
-    tabState.set(tabId, { ...state, conversationHistory: history });
+    const history = [...(state.conversationHistory || [])];
+
+    // Only show user messages in the history we return to UI, 
+    // but pass everything to the AI.
+    if (!isSystem) {
+        history.push({ role: 'user', content: text });
+    } else {
+        // System context injection
+        history.push({ role: 'user', content: text, hidden: true });
+    }
 
     // Request fresh inference with history
     const response = await fetchInference({
         snapshot: state.snapshot,
         sessionId: String(tabId),
-        conversationHistory: history
+        conversationHistory: history,
     });
 
     if (response) {
@@ -103,14 +186,32 @@ async function handleChatMessage(tabId, { text }) {
                 id: `chat-${Date.now()}`,
                 tier: 'ai_index',
                 title: response.guideTitle,
+                narrative: response.narrative,
                 suggestedIntents: response.suggestedIntents,
                 steps: response.steps,
+                provider: response.provider,
+                confidence: response.confidence,
             }],
             requiresInference: false,
         };
+
         history.push({ role: 'assistant', content: `Updated guide: ${response.guideTitle}` });
-        tabState.set(tabId, { ...state, conversationHistory: history, response: guideResponse });
-        sendToTab(tabId, { type: 'GUIDE_RESPONSE', response: guideResponse });
+        tabState.set(tabId, {
+            ...state,
+            conversationHistory: history.slice(-12),
+            response: guideResponse,
+        });
+
+        sendToTab(tabId, {
+            type: 'GUIDE_RESPONSE',
+            response: { ...guideResponse, pageChain: state.pageChain },
+        });
+    } else {
+        // Inference failed
+        sendToTab(tabId, {
+            type: 'GUIDE_ERROR',
+            error: 'AI is temporarily unavailable. Please try your request again.'
+        });
     }
 }
 
@@ -133,7 +234,7 @@ async function fetchGuides({ domain, url, snapshotHash }) {
     }
 }
 
-async function fetchInference({ snapshot, sessionId, conversationHistory = [] }) {
+async function fetchInference({ snapshot, sessionId, conversationHistory = [], snapshotHash }) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000); // 20s hard timeout
 
@@ -142,7 +243,7 @@ async function fetchInference({ snapshot, sessionId, conversationHistory = [] })
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                snapshot,
+                snapshot: { ...snapshot, snapshotHash },
                 sessionId,
                 lang: navigator.language?.slice(0, 2) || 'en',
                 conversationHistory,
@@ -156,6 +257,19 @@ async function fetchInference({ snapshot, sessionId, conversationHistory = [] })
         return null;
     } finally {
         clearTimeout(timeout);
+    }
+}
+
+async function saveWorkflow({ guideTitle, steps, snapshotHash, domain, urlPath, confidence }) {
+    try {
+        await fetch(`${API_BASE}/inference/save-workflow`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ guideTitle, steps, snapshotHash, domain, urlPath, confidence }),
+        });
+        console.log('[WebGuide BG] Workflow saved:', guideTitle);
+    } catch (err) {
+        console.warn('[WebGuide BG] Workflow save failed (non-critical):', err);
     }
 }
 

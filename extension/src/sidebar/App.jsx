@@ -1,40 +1,86 @@
-import { h } from 'preact';
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { h, Fragment } from 'preact';
+import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { COLORS, GLASS, SHADOWS, ANIMATIONS, TYPOGRAPHY } from '../shared/design-system.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // App — Main Sidebar Component
 // ────────────────────────────────────────────────────────────────────────────
-export default function App({ guides = [], loading = false, onSendChat, onHighlight }) {
+export default function App({
+    guides = [],
+    loading = false,
+    pageChain = [],
+    onSendChat,
+    onHighlight,
+    onRegisterAddMessage,
+}) {
     const [open, setOpen] = useState(true);
-    const [activeStep, setActiveStep] = useState(0);
     const [chatText, setChatText] = useState('');
     const [isThinking, setIsThinking] = useState(false);
-    const [messages, setMessages] = useState([]); // Chat history
-    const [showAllIntents, setShowAllIntents] = useState(false);
+    const [messages, setMessages] = useState([]);
     const messagesEndRef = useRef(null);
+
+    // Draggable position state
+    const [pos, setPos] = useState({ top: 12, right: 12 });
+    const [dragging, setDragging] = useState(false);
+    const dragStart = useRef({ x: 0, y: 0, initialTop: 0, initialRight: 0 });
+
+    const handleDragStart = (e) => {
+        setDragging(true);
+        dragStart.current = {
+            x: e.clientX,
+            y: e.clientY,
+            initialTop: pos.top,
+            initialRight: pos.right,
+        };
+        // No e.preventDefault() here so child buttons still work normally if we had any, 
+        // but 'grab' handle is usually empty space.
+    };
+
+    useEffect(() => {
+        if (!dragging) return;
+
+        const handleMouseMove = (e) => {
+            const dx = e.clientX - dragStart.current.x;
+            const dy = e.clientY - dragStart.current.y;
+            setPos({
+                top: Math.max(0, dragStart.current.initialTop + dy),
+                right: Math.max(0, dragStart.current.initialRight - dx),
+            });
+        };
+
+        const handleMouseUp = () => setDragging(false);
+
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseup', handleMouseUp);
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [dragging]);
 
     // Fade-in on mount
     const [visible, setVisible] = useState(false);
     useEffect(() => { setVisible(true); }, []);
-
-    // Reset step counter when guide changes
-    useEffect(() => { setActiveStep(0); }, [guides]);
 
     // Auto-scroll to latest message
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // Auto-highlight active step's element
+    // Register addAiMessage fn with parent mount
+    const addAiMessage = useCallback((text, richData = null) => {
+        setIsThinking(false);
+        setMessages((prev) => [...prev, {
+            role: 'ai',
+            text,
+            ts: Date.now(),
+            richData // { suggestedIntents: [], steps: [] }
+        }]);
+    }, []);
+
     useEffect(() => {
-        const guide = guides[0];
-        if (!guide || !guide.steps) return;
-        const step = guide.steps[activeStep];
-        if (step?.elementSelector && onHighlight) {
-            onHighlight(step.elementSelector, step.tooltipText || step.instruction);
-        }
-    }, [activeStep, guides]);
+        if (onRegisterAddMessage) onRegisterAddMessage(addAiMessage);
+    }, [addAiMessage, onRegisterAddMessage]);
 
     if (!open) {
         return (
@@ -49,53 +95,28 @@ export default function App({ guides = [], loading = false, onSendChat, onHighli
         );
     }
 
-    const guide = guides[0] ?? null;
-
     const handleChatSubmit = async (e) => {
         e.preventDefault();
         const text = chatText.trim();
         if (!text || isThinking) return;
 
-        const userMsg = { role: 'user', text, ts: Date.now() };
-        setMessages((prev) => [...prev, userMsg]);
+        setMessages((prev) => [...prev, { role: 'user', text, ts: Date.now() }]);
         setChatText('');
         setIsThinking(true);
-
-        if (onSendChat) await onSendChat(text);
-
-        // setIsThinking will be reset by the incoming message or a timeout
-        // But we set it to false here as a safety in case the browser port resolves immediately
-        setIsThinking(false);
+        if (onSendChat) onSendChat(text).catch(() => setIsThinking(false));
     };
 
-    // When guide updates and there are messages, add an AI bubble
-    const prevGuideTitleRef = useRef(null);
-    useEffect(() => {
-        if (!guide) return;
-
-        // Any guide update clears the thinking state
-        setIsThinking(false);
-
-        if (prevGuideTitleRef.current && prevGuideTitleRef.current !== guide.title) {
-            setMessages((prev) => [...prev, {
-                role: 'ai',
-                text: `Updated guide: **${guide.title}**`,
-                ts: Date.now(),
-            }]);
-        }
-        prevGuideTitleRef.current = guide.title;
-    }, [guide]);
-
-    // Intents displayed (sorted by confidence, collapse > 4)
-    const allIntents = guide?.suggestedIntents ?? [];
-    const sortedIntents = [...allIntents].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-    const visibleIntents = showAllIntents ? sortedIntents : sortedIntents.slice(0, 4);
+    const latestGuide = guides[0] || null;
 
     return (
         <div
             id="webguide-sidebar"
             style={{
                 ...sidebarStyle,
+                position: 'fixed',
+                top: `${pos.top}px`,
+                right: `${pos.right}px`,
+                pointerEvents: 'auto', // Catch mice on the sidebar only
                 opacity: visible ? 1 : 0,
                 transform: visible ? 'translateX(0)' : 'translateX(20px)',
             }}
@@ -103,183 +124,106 @@ export default function App({ guides = [], loading = false, onSendChat, onHighli
             aria-label="WebGuide"
         >
             {/* ── Header ── */}
-            <header style={headerStyle}>
+            <header
+                style={{ ...headerStyle, cursor: dragging ? 'grabbing' : 'grab' }}
+                onMouseDown={handleDragStart}
+            >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <div style={logoIcon}>WG</div>
                     <span style={TYPOGRAPHY.h2}>WebGuide</span>
-                    {guide && (
+                    {latestGuide && (
                         <div style={guideBadge}>
-                            {guide.tier === 'verified' ? '✓ verified' : '✦ ai'}
+                            {latestGuide.tier === 'verified' ? '✓ verified' : '✦ ai'}
                         </div>
                     )}
                 </div>
                 <button onClick={() => setOpen(false)} aria-label="Close" style={closeBtn}>✕</button>
             </header>
 
-            {/* ── Body ── */}
+            {/* ── Workflow Map Breadcrumbs (Pinned) ── */}
+            {pageChain.length > 0 && (
+                <div style={breadcrumbContainer}>
+                    {pageChain.map((node, i) => (
+                        <Fragment key={i}>
+                            <div
+                                style={{
+                                    ...breadcrumbNode,
+                                    color: i === pageChain.length - 1 ? COLORS.text : COLORS.textMuted,
+                                    fontWeight: i === pageChain.length - 1 ? 600 : 400,
+                                }}
+                                title={node.url}
+                            >
+                                {node.title || 'Page'}
+                            </div>
+                            {i < pageChain.length - 1 && <span style={breadcrumbSeparator}>›</span>}
+                        </Fragment>
+                    ))}
+                </div>
+            )}
+
+            {/* ── Main Chat Feed ── */}
             <div style={bodyStyle}>
-                {/* Loading state */}
-                {loading && (
-                    <div style={centerState}>
-                        <div style={spinnerStyle}></div>
-                        <p style={TYPOGRAPHY.caption}>Detecting navigation options...</p>
-                    </div>
-                )}
+                <div style={chatHistoryFull}>
+                    {/* Welcome Message if empty */}
+                    {messages.length === 0 && (
+                        <div style={centerState}>
+                            <div style={pulseCircle}></div>
+                            <p style={TYPOGRAPHY.caption}>Welcome to WebGuide.</p>
+                            <p style={{ ...TYPOGRAPHY.caption, marginTop: 4 }}>
+                                {loading ? 'Analyzing page...' : 'Ask me anything to start a workflow.'}
+                            </p>
+                        </div>
+                    )}
 
-                {/* Empty state */}
-                {!loading && !guide && messages.length === 0 && (
-                    <div style={centerState}>
-                        <div style={pulseCircle}></div>
-                        <p style={TYPOGRAPHY.caption}>Analysing page...</p>
-                        <p style={{ ...TYPOGRAPHY.caption, marginTop: 0 }}>
-                            Ask me anything below
-                        </p>
-                    </div>
-                )}
-
-                {/* Guide + intent panel */}
-                {!loading && guide && (
-                    <div style={fadeIn}>
-                        {/* Guide title */}
-                        <h2 style={{ ...TYPOGRAPHY.h1, margin: '0 0 12px' }}>
-                            {guide.title}
-                        </h2>
-
-                        {/* Intent accordion */}
-                        {visibleIntents.length > 0 && (
-                            <div style={intentsSection}>
-                                <div style={intentsSectionHeader}>
-                                    <span style={sectionLabel}>Quick Actions</span>
-                                    <span style={intentCount}>{allIntents.length}</span>
-                                </div>
-                                <div style={intentsGrid}>
-                                    {visibleIntents.map((intent) => (
-                                        <button
-                                            key={intent.id}
-                                            style={intentCard}
-                                            onClick={() => {
-                                                if (onSendChat) {
-                                                    setMessages((prev) => [...prev, { role: 'user', text: intent.title, ts: Date.now() }]);
-                                                    setIsThinking(true);
-                                                    onSendChat(intent.title).then(() => setIsThinking(false));
-                                                }
-                                            }}
-                                        >
-                                            <div style={intentCardLeft}>
-                                                <div style={{ fontWeight: 600, fontSize: '0.8rem', color: COLORS.text }}>{intent.title}</div>
-                                                <div style={{ fontSize: '0.72rem', color: COLORS.textMuted, marginTop: 2 }}>{intent.description}</div>
-                                            </div>
-                                            {intent.confidence > 0 && (
-                                                <div style={intentConfidence(intent.confidence)}>
-                                                    {Math.round(intent.confidence * 100)}%
-                                                </div>
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                                {allIntents.length > 4 && (
-                                    <button
-                                        style={showMoreBtn}
-                                        onClick={() => setShowAllIntents((s) => !s)}
-                                    >
-                                        {showAllIntents ? '▲ Show less' : `▼ See ${allIntents.length - 4} more options`}
-                                    </button>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Step-by-step guide */}
-                        {guide.steps?.length > 0 && (
-                            <div>
-                                <div style={sectionLabel}>Navigation Options</div>
-                                <div style={stepsList}>
-                                    {guide.steps.map((step, i) => {
-                                        const isActive = i === activeStep;
-                                        const isDone = i < activeStep;
-                                        return (
-                                            <div
-                                                key={step.stepIndex}
-                                                onClick={() => setActiveStep(i)}
-                                                style={{
-                                                    ...stepItem,
-                                                    borderLeft: isActive ? `3px solid rgba(255,255,255,0.7)` : '3px solid transparent',
-                                                    background: isActive ? 'rgba(255,255,255,0.06)' : 'transparent',
-                                                    opacity: isDone ? 0.45 : 1,
-                                                    cursor: 'pointer',
-                                                }}
-                                            >
-                                                <div style={{ display: 'flex', gap: '12px' }}>
-                                                    <div style={{
-                                                        ...stepNumber,
-                                                        borderColor: isActive ? '#fff' : (isDone ? COLORS.success : COLORS.textMuted),
-                                                        backgroundColor: isDone ? COLORS.success : 'transparent',
-                                                        color: isDone ? '#fff' : (isActive ? '#fff' : COLORS.textMuted),
-                                                    }}>
-                                                        ○
-                                                    </div>
-                                                    <div style={{ flex: 1 }}>
-                                                        <p style={{
-                                                            ...TYPOGRAPHY.body,
-                                                            margin: 0,
-                                                            fontWeight: isActive ? 600 : 400,
-                                                            color: isActive ? COLORS.text : COLORS.textMuted,
-                                                        }}>
-                                                            {step.instruction}
-                                                        </p>
-                                                        {isActive && (
-                                                            <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
-                                                                {step.elementSelector && (
-                                                                    <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            if (onHighlight) onHighlight(step.elementSelector, step.tooltipText || step.instruction);
-                                                                        }}
-                                                                        style={highlightBtn}
-                                                                    >
-                                                                        ✨ Show me
-                                                                    </button>
-                                                                )}
-                                                                <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setActiveStep((s) => Math.min(s + 1, guide.steps.length - 1));
-                                                                    }}
-                                                                    style={actionBtn}
-                                                                >
-                                                                    Select Option →
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {/* Progress bar */}
-                {guide?.steps?.length > 0 && (
-                    <div style={progressBar}>
-                        <div style={{
-                            ...progressFill,
-                            width: `${Math.round((activeStep / guide.steps.length) * 100)}%`,
-                        }}></div>
-                    </div>
-                )}
-            </div>
-
-            {/* ── Chat Thread ── */}
-            {messages.length > 0 && (
-                <div style={chatHistory}>
                     {messages.map((msg, i) => (
                         <div key={i} style={msg.role === 'user' ? userBubble : aiBubble}>
-                            {msg.text}
+                            <div style={{ whiteSpace: 'pre-wrap', fontWeight: 500 }}>{msg.text}</div>
+
+                            {/* Rich Content: Intents (Explorer Mode) */}
+                            {msg.richData?.suggestedIntents?.length > 0 && (
+                                <div style={inlineIntentsGrid}>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                        {msg.richData.suggestedIntents.map((intent) => (
+                                            <button
+                                                key={intent.id}
+                                                style={inlineIntentBtn}
+                                                onClick={() => {
+                                                    setMessages((prev) => [...prev, { role: 'user', text: intent.title, ts: Date.now() }]);
+                                                    setIsThinking(true);
+                                                    if (onSendChat) onSendChat(intent.title).catch(() => setIsThinking(false));
+                                                }}
+                                            >
+                                                {intent.title}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Rich Content: Steps (Tutorial Mode) */}
+                            {msg.richData?.steps?.length > 0 && (!msg.richData.suggestedIntents || msg.richData.suggestedIntents.length === 0) && (
+                                <div style={inlineStepsList}>
+                                    {msg.richData.steps.map((step, idx) => (
+                                        <div key={idx} style={inlineStepItem}>
+                                            <div style={inlineStepNum}>{idx + 1}</div>
+                                            <div style={{ flex: 1 }}>
+                                                <div style={{ fontSize: '0.8rem', color: COLORS.text }}>{step.instruction}</div>
+                                                {step.elementSelector && (
+                                                    <button
+                                                        style={inlineShowMeBtn}
+                                                        onClick={() => onHighlight?.(step.elementId || step.elementSelector, step.tooltipText || step.instruction)}
+                                                    >
+                                                        ✨ Show me
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     ))}
+
                     {isThinking && (
                         <div style={aiBubble}>
                             <span style={thinkingDots}>
@@ -289,20 +233,22 @@ export default function App({ guides = [], loading = false, onSendChat, onHighli
                     )}
                     <div ref={messagesEndRef} />
                 </div>
-            )}
+            </div>
 
             {/* ── Chat Input ── */}
             <div style={chatContainer}>
                 <form onSubmit={handleChatSubmit} style={chatForm}>
                     <input
+                        id="webguide-chat-input"
                         type="text"
-                        placeholder={guide ? 'Refine your goal...' : 'What do you want to do?'}
+                        placeholder="What do you want to do?"
                         value={chatText}
                         onInput={(e) => setChatText(e.target.value)}
                         style={chatInput}
                         disabled={isThinking}
                     />
                     <button
+                        id="webguide-chat-submit"
                         type="submit"
                         style={{ ...chatSubmit, opacity: isThinking || !chatText.trim() ? 0.5 : 1 }}
                         disabled={isThinking || !chatText.trim()}
@@ -314,24 +260,122 @@ export default function App({ guides = [], loading = false, onSendChat, onHighli
 
             {/* ── Footer ── */}
             <footer style={footerStyle}>
-                {guide?.provider ? `✦ ${guide.provider}` : 'WebGuide AI'}
+                {latestGuide?.provider ? `✦ ${latestGuide.provider}` : 'WebGuide AI'}
             </footer>
         </div>
     );
 }
+
+// ── Additional Styles ────────────────────────────────────────────────────────
+
+const breadcrumbContainer = {
+    display: 'flex',
+    padding: '10px 20px',
+    background: 'rgba(255,255,255,0.03)',
+    borderBottom: `1px solid ${COLORS.border}`,
+    overflowX: 'auto',
+    whiteSpace: 'nowrap',
+    gap: '6px',
+    alignItems: 'center',
+    scrollbarWidth: 'none',
+};
+
+const breadcrumbNode = {
+    fontSize: '0.72rem',
+    maxWidth: '100px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+};
+
+const breadcrumbSeparator = {
+    color: COLORS.textMuted,
+    fontSize: '0.8rem',
+    opacity: 0.5,
+};
+
+const inlineIntentsGrid = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    marginTop: '12px',
+};
+
+const inlineDivider = {
+    fontSize: '9px',
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    color: COLORS.textMuted,
+    marginBottom: '4px',
+    opacity: 0.7,
+};
+
+const inlineIntentBtn = {
+    background: 'rgba(255,255,255,0.08)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: '16px',
+    padding: '4px 12px',
+    fontSize: '0.75rem',
+    color: COLORS.text,
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    fontWeight: 500,
+};
+
+const inlineStepsList = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    marginTop: '12px',
+};
+
+const inlineStepItem = {
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'flex-start',
+};
+
+const inlineStepNum = {
+    width: '18px',
+    height: '18px',
+    borderRadius: '50%',
+    background: 'rgba(255,255,255,0.1)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '10px',
+    fontWeight: 700,
+    color: COLORS.text,
+    flexShrink: 0,
+};
+
+const inlineShowMeBtn = {
+    marginTop: '6px',
+    background: 'rgba(255,255,255,0.1)',
+    border: `1px solid rgba(255,255,255,0.15)`,
+    borderRadius: '6px',
+    padding: '3px 8px',
+    fontSize: '0.7rem',
+    fontWeight: 600,
+    color: '#fff',
+    cursor: 'pointer',
+};
+
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 
 const sidebarStyle = {
     ...GLASS,
     width: '320px',
-    height: '100vh',
+    height: 'calc(100vh - 24px)', // Floating height
+    borderRadius: '16px',          // Rounded corners
     display: 'flex',
     flexDirection: 'column',
     boxShadow: SHADOWS.xl,
-    transition: ANIMATIONS.transition,
+    transition: 'opacity 0.25s, transform 0.25s', // Don't transition top/right for drag smoothness
     fontFamily: TYPOGRAPHY.fontFamily,
     color: COLORS.text,
+    overflow: 'hidden',           // Clip rounded glass
 };
 
 const headerStyle = {
@@ -341,6 +385,34 @@ const headerStyle = {
     padding: '16px 20px',
     borderBottom: `1px solid ${COLORS.border}`,
     flexShrink: 0,
+};
+
+const tabBar = {
+    display: 'flex',
+    padding: '8px 12px',
+    gap: '4px',
+    borderBottom: `1px solid ${COLORS.border}`,
+    flexShrink: 0,
+};
+
+const tabBtn = {
+    flex: 1,
+    background: 'transparent',
+    border: '1px solid transparent',
+    borderRadius: '7px',
+    color: COLORS.textMuted,
+    fontSize: '11px',
+    fontWeight: 600,
+    padding: '5px 6px',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    whiteSpace: 'nowrap',
+};
+
+const tabBtnActive = {
+    background: 'rgba(255,255,255,0.1)',
+    border: `1px solid rgba(255,255,255,0.2)`,
+    color: COLORS.text,
 };
 
 const bodyStyle = {
@@ -467,9 +539,7 @@ const intentCard = {
     gap: '8px',
 };
 
-const intentCardLeft = {
-    flex: 1,
-};
+const intentCardLeft = { flex: 1 };
 
 const intentConfidence = (score) => ({
     fontSize: '10px',
@@ -554,31 +624,81 @@ const progressFill = {
     transition: 'width 0.4s ease',
 };
 
-// Chat
-const chatHistory = {
-    padding: '12px 20px',
-    borderTop: `1px solid ${COLORS.border}`,
-    maxHeight: '200px',
-    overflowY: 'auto',
+// ── Workflow Map ──────────────────────────────────────────────────────────────
+
+const mapChain = {
     display: 'flex',
     flexDirection: 'column',
-    gap: '8px',
-    flexShrink: 0,
+    gap: '0',
+};
+
+const mapNode = {
+    background: 'rgba(255,255,255,0.04)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: '10px',
+    padding: '10px 14px',
+};
+
+const mapNodeActive = {
+    background: 'rgba(255,255,255,0.08)',
+    border: `1px solid rgba(255,255,255,0.3)`,
+    boxShadow: '0 0 0 1px rgba(255,255,255,0.1)',
+};
+
+const mapNodeTitle = {
+    fontSize: '0.82rem',
+    fontWeight: 600,
+    color: COLORS.text,
+};
+
+const mapNodeUrl = {
+    fontSize: '0.7rem',
+    color: COLORS.textMuted,
+    marginTop: '2px',
+    fontFamily: 'monospace',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+};
+
+const mapNodeSteps = {
+    fontSize: '0.7rem',
+    color: COLORS.secondary,
+    marginTop: '4px',
+};
+
+const mapArrow = {
+    fontSize: '16px',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    padding: '3px 0',
+};
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+
+const chatHistoryFull = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    overflowY: 'auto',
+    flex: 1,
+    paddingBottom: '8px',
 };
 
 const baseBubble = {
-    padding: '8px 12px',
+    padding: '10px 14px',
     borderRadius: '12px',
     fontSize: '0.8rem',
-    lineHeight: '1.4',
-    maxWidth: '85%',
+    lineHeight: '1.5',
+    maxWidth: '90%',
     wordBreak: 'break-word',
 };
 
 const userBubble = {
     ...baseBubble,
-    background: 'rgba(255,255,255,0.15)',
-    border: `1px solid rgba(255,255,255,0.2)`,
+    background: 'rgba(255,255,255,0.12)',
+    backdropFilter: 'blur(8px)',
+    border: `1px solid rgba(255,255,255,0.15)`,
     color: '#fff',
     alignSelf: 'flex-end',
     borderBottomRightRadius: '4px',
@@ -586,12 +706,15 @@ const userBubble = {
 
 const aiBubble = {
     ...baseBubble,
-    background: 'rgba(255,255,255,0.07)',
-    border: `1px solid ${COLORS.border}`,
-    color: COLORS.textMuted,
+    background: 'rgba(255,255,255,0.04)',
+    backdropFilter: 'blur(8px)',
+    border: `1px solid rgba(255,255,255,0.08)`,
+    color: COLORS.text,
     alignSelf: 'flex-start',
     borderBottomLeftRadius: '4px',
 };
+
+const aiBubbleLabel = { display: 'none' };
 
 const thinkingDots = {
     display: 'inline-flex',

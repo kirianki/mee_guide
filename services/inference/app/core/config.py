@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str
     LOG_LEVEL: str = "info"
     ENVIRONMENT: str = "development"
+    GUIDE_REGISTRY_URL: str = "http://guide-registry:8001"
 
 
 settings = Settings()

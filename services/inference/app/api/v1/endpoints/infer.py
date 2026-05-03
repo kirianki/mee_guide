@@ -32,6 +32,7 @@ class InferenceStep(BaseModel):
     instruction: str
     tooltipText: Optional[str] = None
     elementSelector: Optional[str] = None
+    elementId: Optional[str] = None
     completionTrigger: str = "manual"
     completionSelector: Optional[str] = None
 
@@ -43,9 +44,11 @@ class Intent(BaseModel):
 
 
 class InferenceResponse(BaseModel):
+    reasoning: Optional[str] = None
     guideTitle: str
+    narrative: Optional[str] = None
     suggestedIntents: list[Intent] = []
-    steps: list[InferenceStep]
+    steps: list[InferenceStep] = []
     errorDetected: Optional[str] = None
     confidence: float
     provider: str   # 'openai' | 'anthropic' | 'rule' | 'cache' | 'none'

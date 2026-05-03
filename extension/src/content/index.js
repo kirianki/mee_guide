@@ -68,6 +68,9 @@ browser.runtime.onMessage.addListener((message) => {
             setupAutoProgress(guide.steps);
         }
     }
+    else if (message.type === 'GUIDE_ERROR') {
+        updateSidebar({ error: message.error });
+    }
 
     if (message.type === 'HIGHLIGHT_ELEMENT') {
         showSpotlight(message.selector, message.label);

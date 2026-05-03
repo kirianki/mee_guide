@@ -6,12 +6,13 @@ import { showSpotlight, hideSpotlight } from './spotlight.js';
 
 let shadowRoot = null;
 let appContainer = null;
+let addAiMessageFn = null; // Injected by App on mount
 
 /** Called once on page load */
 export function mountSidebar() {
     const host = document.createElement('div');
     host.id = 'webguide-sidebar-host';
-    host.style.cssText = 'position:fixed;top:0;right:0;z-index:2147483647;';
+    host.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;';
     document.body.appendChild(host);
 
     shadowRoot = host.attachShadow({ mode: 'closed' });
@@ -37,13 +38,50 @@ export function mountSidebar() {
     appContainer = document.createElement('div');
     shadowRoot.appendChild(appContainer);
 
-    renderApp({ guides: [], loading: true });
+    renderApp({ guides: [], loading: true, pageChain: [] });
 }
 
 /** Called whenever the background sends new guide data */
 export function updateSidebar(response) {
     if (!appContainer) return;
-    renderApp({ guides: response?.guides ?? [], loading: false });
+
+    const guides = response?.guides ?? [];
+    const pageChain = response?.pageChain ?? [];
+
+    // Build AI reply text from the first guide's steps
+    const guide = guides[0];
+    if (response?.error && addAiMessageFn) {
+        addAiMessageFn(`⚠️ **Error**: ${response.error}`);
+        return;
+    }
+
+    if (guide && addAiMessageFn) {
+        const stepCount = guide.steps?.length ?? 0;
+        const intentionsCount = guide.suggestedIntents?.length ?? 0;
+
+        // Strictly prioritize the AI's narrative for a natural feel.
+        // If missing, show only the title without technical counts.
+        let aiText = guide.narrative || guide.title;
+
+        // Pass the rich data (intents/steps) to the chat UI
+        const finalSteps = (guide.steps || []).map(s => ({
+            ...s,
+            elementId: s.elementId || null
+        }));
+
+        addAiMessageFn(aiText, {
+            suggestedIntents: guide.suggestedIntents || [],
+            steps: finalSteps
+        });
+
+        // Auto-show spotlight for the first step if we have one and it's a chat response
+        if (finalSteps.length > 0 && finalSteps[0].elementId) {
+            const step = finalSteps[0];
+            showSpotlight(step.elementId, step.tooltipText || step.instruction);
+        }
+    }
+
+    renderApp({ guides, loading: false, pageChain });
 }
 
 function renderApp(props) {
@@ -52,6 +90,7 @@ function renderApp(props) {
             ...props,
             onSendChat: sendChatMessage,
             onHighlight: (selector, label) => showSpotlight(selector, label),
+            onRegisterAddMessage: (fn) => { addAiMessageFn = fn; },
         }),
         appContainer
     );

@@ -26,11 +26,32 @@ function findTarget(selector) {
         return rects.length > 0;
     };
 
-    // Recursive search through Shadow DOMs
+    // Strategy 0: Primary Stable ID (Injected data-wg-id)
+    if (selector.startsWith('wg-') || selector.includes('[data-wg-id')) {
+        const id = selector.startsWith('wg-') ? selector : selector.match(/data-wg-id=["'](.*?)["']/)?.[1] || selector;
+        const idSelector = `[data-wg-id="${id}"]`;
+
+        const deepFindId = (root) => {
+            let el = root.querySelector(idSelector);
+            if (el) return el;
+            const hosts = root.querySelectorAll('*');
+            for (const h of hosts) {
+                if (h.shadowRoot) {
+                    el = deepFindId(h.shadowRoot);
+                    if (el) return el;
+                }
+            }
+            return null;
+        };
+
+        const target = deepFindId(document);
+        if (target && isVisible(target)) return target;
+    }
+
+    // Strategy 1: Shadow-DOM Aware Query Selector
     const deepQuerySelector = (root, sel) => {
         let match = root.querySelector(sel);
         if (match) return match;
-
         const hosts = root.querySelectorAll('*');
         for (const host of hosts) {
             if (host.shadowRoot) {
@@ -41,10 +62,15 @@ function findTarget(selector) {
         return null;
     };
 
+    try {
+        const el = deepQuerySelector(document, selector);
+        if (el && isVisible(el)) return el;
+    } catch (e) { }
+
+    // Strategy 2: Text Search Fallback
     const deepGetAll = (root, tags, results = []) => {
         const found = root.querySelectorAll(tags);
         results.push(...Array.from(found));
-
         const hosts = root.querySelectorAll('*');
         for (const host of hosts) {
             if (host.shadowRoot) {
@@ -54,37 +80,21 @@ function findTarget(selector) {
         return results;
     };
 
-    // Strategy 1: Standard CSS (Deep)
-    try {
-        const el = deepQuerySelector(document, selector);
-        if (el && isVisible(el)) return el;
-    } catch (e) { }
-
-    // Strategy 2: AI-standard ":contains" or ":text" patterns
-    const cleanText = selector.replace(/.*:contains\(['"](.*?)['"]\).*/, '$1').replace(/.*:text\(['"](.*?)['"]\).*/, '$1').trim();
+    const cleanText = selector.replace(/.*:contains\(['"]?(.*?)['"]?\).*/, '$1').replace(/.*:text\(['"]?(.*?)['"]?\).*/, '$1').trim();
     const isPseudo = selector.includes(':contains') || selector.includes(':text');
     const searchTerm = (isPseudo ? cleanText : selector).toLowerCase();
 
-    // Strategy 3: Exhaustive Text & Attribute Search (Deep)
     const tags = 'button, a, input, select, textarea, [role="button"], span, div, p, h1, h2, h3, h4, li';
     const elements = deepGetAll(document, tags);
     let bestMatch = null;
 
     for (const el of elements) {
         if (!isVisible(el)) continue;
-
         const content = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') ? (el.value || '') : (el.textContent || '');
         const text = content.trim().toLowerCase();
-        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
-        const title = el.getAttribute('title')?.toLowerCase() || '';
-        const placeholder = el.getAttribute('placeholder')?.toLowerCase() || '';
-        const name = el.getAttribute('name')?.toLowerCase() || '';
-
-        if (text.includes(searchTerm) || aria.includes(searchTerm) || title.includes(searchTerm) || placeholder.includes(searchTerm) || name.includes(searchTerm)) {
-            // Find parent interactive container
+        if (text.includes(searchTerm)) {
             const interactiveParent = el.closest('button, a, input, select, textarea, [role="button"]');
             if (interactiveParent) return interactiveParent;
-
             if (['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName) || el.getAttribute('role') === 'button') {
                 return el;
             }
@@ -97,85 +107,61 @@ function findTarget(selector) {
 
 /**
  * Show a glowing spotlight ring around the element matched by `selector`.
- * @param {string} selector - CSS selector for the target element
- * @param {string} label    - Tooltip text shown near the element
  */
-export function showSpotlight(selector, label = 'Perform this action') {
+export function showSpotlight(selector, label = 'Perform this action', _attempt = 0) {
     const target = findTarget(selector);
+
     if (!target) {
-        console.warn('[WebGuide Spotlight] Target not found for:', selector);
+        if (_attempt < 15) {
+            requestAnimationFrame(() => showSpotlight(selector, label, _attempt + 1));
+        } else {
+            console.warn('[WebGuide Spotlight] Target not found:', selector);
+        }
         return;
     }
 
-    hideSpotlight(); // Clear any existing spotlight
+    hideSpotlight();
 
-    // ── Root container ────────────────────────────────────────────────────────
     const root = document.createElement('div');
     root.id = SPOTLIGHT_ID;
     root.style.cssText = `
-        position: fixed;
-        inset: 0;
-        z-index: 2147483646;
-        pointer-events: none;
+        position: fixed; inset: 0; z-index: 2147483645; pointer-events: none;
     `;
 
-    // ── Dark overlay (dim = cutout around target) ─────────────────────────────
     const overlay = document.createElement('div');
     overlay.style.cssText = `
-        position: absolute;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.45);
-        pointer-events: none;
+        position: absolute; inset: 0; background: rgba(0, 0, 0, 0.4); pointer-events: none;
         transition: opacity 0.3s ease;
     `;
 
-    // ── Glow ring ─────────────────────────────────────────────────────────────
     const ring = document.createElement('div');
     ring.style.cssText = `
-        position: fixed;
-        border: 2px solid rgba(255,255,255,0.7);
-        border-radius: 10px;
-        box-shadow: 0 0 0 4px rgba(255,255,255,0.1), 0 0 24px 8px rgba(255,255,255,0.15);
-        animation: wg-ring-pulse 1.5s ease-in-out infinite;
-        pointer-events: none;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        position: fixed; border: 3px solid #6366f1; border-radius: 12px;
+        box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2), 0 0 30px 10px rgba(99, 102, 241, 0.3);
+        animation: wg-ring-pulse 2s infinite; pointer-events: none;
+        transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     `;
 
-    // ── Tooltip ───────────────────────────────────────────────────────────────
     const tooltip = document.createElement('div');
     tooltip.style.cssText = `
-        position: fixed;
-        background: rgba(15, 23, 42, 0.95);
-        backdrop-filter: blur(16px);
-        border: 1px solid rgba(99, 102, 241, 0.4);
-        border-radius: 8px;
-        padding: 8px 14px;
-        color: #f8fafc;
-        font-family: "Inter", system-ui, sans-serif;
-        font-size: 13px;
-        font-weight: 600;
-        white-space: nowrap;
-        pointer-events: none;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        animation: wg-fadeIn 0.3s ease-out;
+        position: fixed; background: #0f172a; border: 1px solid rgba(99, 102, 241, 0.4);
+        border-radius: 10px; padding: 10px 16px; color: #fff; font-family: sans-serif;
+        font-size: 14px; font-weight: 600; white-space: nowrap; pointer-events: none;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.4); animation: wg-fadeIn 0.4s ease-out;
         z-index: 2147483647;
     `;
-    tooltip.innerHTML = `<span style="font-size:16px">👆</span> ${label}`;
+    tooltip.innerHTML = `<span style="margin-right:8px">🎯</span> ${label}`;
 
-    // ── Keyframe injection ────────────────────────────────────────────────────
     if (!document.getElementById('wg-spotlight-styles')) {
         const style = document.createElement('style');
         style.id = 'wg-spotlight-styles';
         style.textContent = `
             @keyframes wg-ring-pulse {
-                0%, 100% { box-shadow: 0 0 0 4px rgba(99,102,241,0.25), 0 0 24px 8px rgba(99,102,241,0.3); }
-                50% { box-shadow: 0 0 0 8px rgba(99,102,241,0.15), 0 0 40px 16px rgba(99,102,241,0.2); }
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.04); opacity: 0.8; }
             }
             @keyframes wg-fadeIn {
-                from { opacity: 0; transform: translateY(6px); }
+                from { opacity: 0; transform: translateY(10px); }
                 to { opacity: 1; transform: translateY(0); }
             }
         `;
@@ -189,39 +175,31 @@ export function showSpotlight(selector, label = 'Perform this action') {
 
     currentSpotlight = { root, ring, tooltip, target };
 
-    // ── Position ring & tooltip (follows element on scroll/resize via rAF) ────
     function positionElements() {
+        if (!currentSpotlight) return;
         const rect = target.getBoundingClientRect();
-        const PAD = 6;
+        const PAD = 8;
 
         ring.style.left = `${rect.left - PAD}px`;
         ring.style.top = `${rect.top - PAD}px`;
         ring.style.width = `${rect.width + PAD * 2}px`;
         ring.style.height = `${rect.height + PAD * 2}px`;
 
-        // Position tooltip above element, or below if not enough room
-        const tooltipH = 40;
-        const above = rect.top - PAD - tooltipH - 8;
-        const tTop = above > 0 ? above : rect.bottom + PAD + 4;
-        tooltip.style.left = `${Math.max(8, rect.left)}px`;
+        const tooltipH = 44;
+        const above = rect.top - PAD - tooltipH - 12;
+        const tTop = above > 20 ? above : rect.bottom + PAD + 12;
+        tooltip.style.left = `${Math.max(12, rect.left)}px`;
         tooltip.style.top = `${tTop}px`;
 
         rafHandle = requestAnimationFrame(positionElements);
     }
 
     positionElements();
-
-    // ── Auto-dismiss after 10s ────────────────────────────────────────────────
-    dismissTimer = setTimeout(() => hideSpotlight(), 10000);
-
-    // ── Also dismiss on user click near element ───────────────────────────────
+    dismissTimer = setTimeout(() => hideSpotlight(), 15000);
     target.addEventListener('click', () => hideSpotlight(), { once: true });
-
-    // Scroll target into view smoothly
-    target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-/** Remove the spotlight overlay */
 export function hideSpotlight() {
     if (rafHandle) cancelAnimationFrame(rafHandle);
     if (dismissTimer) clearTimeout(dismissTimer);

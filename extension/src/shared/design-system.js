@@ -11,14 +11,14 @@ export const COLORS = {
     primary: '#ffffff',          // Pure white — universal accent
     primaryHover: '#e2e8f0',     // Slight warm tone on hover
     secondary: '#cbd5e1',        // Silver / Slate 300
-    background: 'rgba(10, 10, 12, 0.88)',   // Near-black, site-agnostic
-    surface: 'rgba(30, 30, 35, 0.6)',        // Slightly lighter surface
-    border: 'rgba(255, 255, 255, 0.1)',      // Subtle white border
-    text: '#f1f5f9',             // Slate 100
-    textMuted: '#94a3b8',        // Slate 400
-    success: '#4ade80',          // Soft green
-    error: '#f87171',            // Soft red
-    accent: 'rgba(255, 255, 255, 0.08)',     // Hover tint (no color)
+    background: 'rgba(10, 10, 12, 0.45)',   // Ultra-transparent ghost background
+    surface: 'rgba(50, 50, 60, 0.3)',        // Floating surface tint
+    border: 'rgba(255, 255, 255, 0.12)',     // Subtle glass boundary
+    text: '#ffffff',             // Bright white for readability
+    textMuted: '#cbd5e1',        // Slate 300
+    success: '#4ade80',
+    error: '#f87171',
+    accent: 'rgba(255, 255, 255, 0.12)',
 };
 
 export const GLASS = {

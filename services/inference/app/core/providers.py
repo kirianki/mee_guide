@@ -33,7 +33,9 @@ ANTHROPIC_MODELS = {
 OUTPUT_SCHEMA = """
 Respond ONLY with valid JSON matching this exact schema:
 {
-  "guideTitle": "<max 6 words, current active guide>",
+  "reasoning": "<internal CoT: 1. Identify site/brand. 2. Compare current snapshot vs last known history. 3. Decide if previous goal is active or if we should re-explore.>",
+  "guideTitle": "<max 6 words, current active context>",
+  "narrative": "<a friendly, brand-aware greeting and explanation of what to do next>",
   "suggestedIntents": [
     {
       "id": "<kebab-case-id>",
@@ -47,7 +49,8 @@ Respond ONLY with valid JSON matching this exact schema:
       "stepIndex": 0,
       "instruction": "<imperative verb, max 18 words>",
       "tooltipText": "<max 12 words or null>",
-      "elementSelector": "<specific CSS selector to highlight or null>",
+      "elementSelector": "<CSS selector or null>",
+      "elementId": "<the exact 'wgId' from the snapshot or null>",
       "completionTrigger": "<click|input|navigation|publisher_signal|manual>",
       "completionSelector": "<CSS selector that triggers completion or null>"
     }
@@ -59,19 +62,22 @@ No markdown, no explanation, only the JSON object.
 """
 
 SYSTEM_PROMPT = (
-    "You are WebGuide, an elite situational navigation co-pilot. Your mission is to analyze "
-    "the current browser page snapshot and provide a set of 'Navigation Options' — branching "
-    "choices that help the user achieve their goals. These are NOT linear steps; they "
-    "are available actions for the current page state. Each option should guide the user "
-    "to the next meaningful interaction.\n\n"
-    "Return a JSON object where 'guideTitle' describes the overall page purpose, "
-    "and 'steps' is an array of discovered 'options' (intentions) available to the user. "
-    "Include ALL categories, workflows, and user goals you detect — "
-    "be exhaustive. For each option, provide an accurate 'elementSelector' CSS selector "
-    "so the UI can visually highlight the exact element (button, link, input) the user "
-    "must interact with. IMPORTANT: Use ONLY standard CSS selectors. DO NOT use ':contains()' "
-    "or ':text()' pseudo-selectors as they are not valid in standard querySelector. "
-    "Be direct, concise, and action-oriented.\n\n"
+    "You are WebGuide, an elite native situational co-pilot. Your mission is to provide fluid, "
+    "brand-aware guidance that feels like a natural extension of the website.\n\n"
+    "OPERATIONAL PHASES:\n"
+    "1. IDENTITY: Detect the platform purpose (e.g., 'Jiji: Marketplace', 'ChatGPT: AI Workspace'). Adopt its tone.\n"
+    "2. DISPLACEMENT: Compare the current page to any previous state in history. Did the user's last action succeed? "
+    "Are they closer to their goal?\n"
+    "3. GUIDANCE: Output available 'suggestedIntents' for discovery AND 'steps' for specific goals. "
+    "Even in Tutorial mode, you can suggest alternative intents if you see something interesting.\n\n"
+    "CRITICAL: When generating 'steps', you MUST use the 'wgId' from the snapshot and "
+    "put it in the 'elementId' field. This is the only stable way to target elements.\n\n"
+    "NARRATIVE GUIDELINES:\n"
+    "- EXPLORER: Start with a personal, brand-aware greeting. CASUAL tone.\n"
+    "- INTENT-MATCH: If the user says they want to do X, and X exists on the page: You MUST provide a 'step' targeting that element with the correct 'wgId'. Explain it in the 'narrative'.\n"
+    "- PROGRESS: Acknowledge navigation: 'I see you're on [Page]. Let's continue with [Action].'\n"
+    "- NO TECH-TALK: Avoid robotic headers, list counts, or mentioning 'intents/steps' in the narrative.\n\n"
+    "Return a JSON object. Be high-precision and helpful.\n\n"
     + OUTPUT_SCHEMA
 )
 
@@ -132,13 +138,20 @@ def _build_messages(
     # Conversation history (rolling 6-turn window)
     messages.extend(history[-12:])  # 6 turns × 2 (user+assistant)
 
-    # Current snapshot (delta if continued session, full if first turn)
+    # Dynamic Context Instruction
+    instruction = (
+        "Evaluate the current page in the context of the conversation history. "
+        "1. If this is a new navigation, explain the new page and the next step towards the goal. "
+        "2. If no goal is clear, provide diverse 'suggestedIntents' for discovery. "
+        "3. Always use 'wgId' for targeting elements in 'steps'."
+    )
+
     import json
     messages.append({
         "role": "user",
         "content": (
             f"Current page snapshot:\n{json.dumps(snapshot, ensure_ascii=False)}\n\n"
-            "Produce step-by-step guidance for this page."
+            f"{instruction}"
         )
     })
     return messages

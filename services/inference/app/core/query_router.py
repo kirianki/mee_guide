@@ -41,11 +41,11 @@ async def get_redis():
 def _trim_snapshot(snapshot: dict) -> dict:
     """Trim snapshot fields to prevent token overload with the richer v2 payload."""
     s = dict(snapshot)
-    s["buttons"] = (s.get("buttons") or [])[:20]
-    s["formFields"] = (s.get("formFields") or [])[:20]
-    s["headings"] = (s.get("headings") or [])[:20]
-    s["categories"] = (s.get("categories") or [])[:20]
-    s["topLinks"] = (s.get("topLinks") or [])[:15]
+    s["buttons"] = (s.get("buttons") or [])[:100]
+    s["formFields"] = (s.get("formFields") or [])[:50]
+    s["headings"] = (s.get("headings") or [])[:50]
+    s["categories"] = (s.get("categories") or [])[:100]
+    s["topLinks"] = (s.get("topLinks") or [])[:40]
     # Structured data can be huge JSON-LD blobs — exclude entirely
     s.pop("structuredData", None)
     return s
@@ -62,7 +62,9 @@ async def route_inference(request: dict) -> dict:
     snapshot_hash = snapshot.get("snapshotHash") or snapshot.get("hash")
 
     # ── Step 1: Redis exact hash cache ───────────────────────────────────────
-    if snapshot_hash:
+    # If the user has a custom chat history, we MUST bypass the visual cache
+    # to generate their specific requested workflow instead of returning the summary.
+    if snapshot_hash and not history:
         r = await get_redis()
         cached = await r.get(f"inference:hash:{snapshot_hash}")
         if cached:
@@ -105,8 +107,8 @@ async def route_inference(request: dict) -> dict:
 
     response = {**result, "modelTier": tier, "provider": provider, "cacheHit": False}
 
-    # Write to Redis cache if confidence is high enough
-    if snapshot_hash and result.get("confidence", 0) >= 0.75:
+    # Write to Redis cache if confidence is high enough (only for base guides, not custom chats)
+    if snapshot_hash and not history and result.get("confidence", 0) >= 0.75:
         r = await get_redis()
         await r.set(f"inference:hash:{snapshot_hash}", json.dumps(response), ex=86400)
 
