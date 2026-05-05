@@ -75,9 +75,9 @@ export function updateSidebar(response) {
         });
 
         // Auto-show spotlight for the first step if we have one and it's a chat response
-        if (finalSteps.length > 0 && finalSteps[0].elementId) {
+        if (finalSteps.length > 0 && (finalSteps[0].elementId || finalSteps[0].elementSelector)) {
             const step = finalSteps[0];
-            showSpotlight(step.elementId, step.tooltipText || step.instruction);
+            showSpotlight(step.elementId, step.elementSelector, step.tooltipText || step.instruction);
         }
     }
 
@@ -89,13 +89,13 @@ function renderApp(props) {
         h(App, {
             ...props,
             onSendChat: sendChatMessage,
-            onHighlight: (selector, label) => showSpotlight(selector, label),
+            onHighlight: (elementId, elementSelector, label) => showSpotlight(elementId, elementSelector, label),
             onRegisterAddMessage: (fn) => { addAiMessageFn = fn; },
         }),
         appContainer
     );
 }
 
-async function sendChatMessage(text) {
-    return browser.runtime.sendMessage({ type: 'CHAT_MESSAGE', text });
+async function sendChatMessage(text, history) {
+    return browser.runtime.sendMessage({ type: 'CHAT_MESSAGE', text, history });
 }

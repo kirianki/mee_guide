@@ -71,9 +71,17 @@ browser.runtime.onMessage.addListener((message) => {
     else if (message.type === 'GUIDE_ERROR') {
         updateSidebar({ error: message.error });
     }
+    else if (message.type === 'THOUGHT_START' || message.type === 'THOUGHT_CHUNK' || message.type === 'THOUGHT_DONE') {
+        window.postMessage(message, '*');
+    }
 
     if (message.type === 'HIGHLIGHT_ELEMENT') {
         showSpotlight(message.selector, message.label);
+    }
+
+    if (message.type === 'REQUEST_SNAPSHOT') {
+        extractSnapshot().then(({ snapshot, hash }) => sendResponse({ snapshot, hash }));
+        return true;
     }
 });
 

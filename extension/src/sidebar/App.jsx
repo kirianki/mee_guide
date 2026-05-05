@@ -16,8 +16,24 @@ export default function App({
     const [open, setOpen] = useState(true);
     const [chatText, setChatText] = useState('');
     const [isThinking, setIsThinking] = useState(false);
+    const [thoughtText, setThoughtText] = useState('');
     const [messages, setMessages] = useState([]);
     const messagesEndRef = useRef(null);
+
+    useEffect(() => {
+        const handler = (e) => {
+            if (e.data?.type === 'THOUGHT_START') {
+                setThoughtText('');
+            } else if (e.data?.type === 'THOUGHT_CHUNK') {
+                setThoughtText((prev) => prev + e.data.text);
+            } else if (e.data?.type === 'THOUGHT_DONE') {
+                // Keep thought text visible but stop dots if needed? 
+                // Actually setIsThinking(false) is handled by addAiMessage.
+            }
+        };
+        window.addEventListener('message', handler);
+        return () => window.removeEventListener('message', handler);
+    }, []);
 
     // Draggable position state
     const [pos, setPos] = useState({ top: 12, right: 12 });
@@ -70,6 +86,7 @@ export default function App({
     // Register addAiMessage fn with parent mount
     const addAiMessage = useCallback((text, richData = null) => {
         setIsThinking(false);
+        setThoughtText('');
         setMessages((prev) => [...prev, {
             role: 'ai',
             text,
@@ -103,7 +120,11 @@ export default function App({
         setMessages((prev) => [...prev, { role: 'user', text, ts: Date.now() }]);
         setChatText('');
         setIsThinking(true);
-        if (onSendChat) onSendChat(text).catch(() => setIsThinking(false));
+        const currentHistory = messages.map(m => ({
+            role: m.role === 'ai' ? 'assistant' : (m.role === 'system' ? 'system' : 'user'),
+            content: m.text + (m.role === 'ai' && m.richData?.steps?.length ? ` [Suggested Steps: ${m.richData.steps.map(s => s.instruction).join(', ')}]` : '')
+        }));
+        if (onSendChat) onSendChat(text, currentHistory).catch(() => setIsThinking(false));
     };
 
     const latestGuide = guides[0] || null;
@@ -180,7 +201,7 @@ export default function App({
                             <div style={{ whiteSpace: 'pre-wrap', fontWeight: 500 }}>{msg.text}</div>
 
                             {/* Rich Content: Intents (Explorer Mode) */}
-                            {msg.richData?.suggestedIntents?.length > 0 && (
+                            {msg.richData?.suggestedIntents?.length > 0 && (!msg.richData.steps || msg.richData.steps.length === 0) && (
                                 <div style={inlineIntentsGrid}>
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                                         {msg.richData.suggestedIntents.map((intent) => (
@@ -188,9 +209,13 @@ export default function App({
                                                 key={intent.id}
                                                 style={inlineIntentBtn}
                                                 onClick={() => {
-                                                    setMessages((prev) => [...prev, { role: 'user', text: intent.title, ts: Date.now() }]);
+                                                    const history = messages.map(m => ({
+                                                        role: m.role === 'ai' ? 'assistant' : (m.role === 'system' ? 'system' : 'user'),
+                                                        content: m.text
+                                                    }));
+                                                    setMessages((prev) => [...prev, { role: 'user', text: `Intent Selected: ${intent.title}`, ts: Date.now() }]);
                                                     setIsThinking(true);
-                                                    if (onSendChat) onSendChat(intent.title).catch(() => setIsThinking(false));
+                                                    if (onSendChat) onSendChat(intent.title, history).catch(() => setIsThinking(false));
                                                 }}
                                             >
                                                 {intent.title}
@@ -200,35 +225,40 @@ export default function App({
                                 </div>
                             )}
 
-                            {/* Rich Content: Steps (Tutorial Mode) */}
-                            {msg.richData?.steps?.length > 0 && (!msg.richData.suggestedIntents || msg.richData.suggestedIntents.length === 0) && (
-                                <div style={inlineStepsList}>
-                                    {msg.richData.steps.map((step, idx) => (
-                                        <div key={idx} style={inlineStepItem}>
-                                            <div style={inlineStepNum}>{idx + 1}</div>
-                                            <div style={{ flex: 1 }}>
-                                                <div style={{ fontSize: '0.8rem', color: COLORS.text }}>{step.instruction}</div>
-                                                {step.elementSelector && (
-                                                    <button
-                                                        style={inlineShowMeBtn}
-                                                        onClick={() => onHighlight?.(step.elementId || step.elementSelector, step.tooltipText || step.instruction)}
-                                                    >
-                                                        ✨ Show me
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
+                            {/* Rich Content: Steps (Action Mode) */}
+                            {msg.richData?.steps?.length > 0 && (
+                                <div style={inlineIntentsGrid}>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                        {msg.richData.steps.map((step, idx) => (
+                                            <button
+                                                key={`step-${idx}`}
+                                                style={{ ...inlineIntentBtn, background: 'rgba(255,255,255,0.15)', borderColor: 'rgba(255,255,255,0.3)' }}
+                                                onClick={() => {
+                                                    setMessages((prev) => [...prev, { role: 'system', text: `(Visual highlight: ${step.instruction})`, ts: Date.now() }]);
+                                                    onHighlight?.(step.elementId, step.elementSelector, step.tooltipText || step.instruction);
+                                                }}
+                                                title="Highlight this location on the page"
+                                            >
+                                                ✨ Show Me: {step.instruction || 'Action'}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
                         </div>
                     ))}
 
                     {isThinking && (
-                        <div style={aiBubble}>
-                            <span style={thinkingDots}>
-                                <span>●</span><span>●</span><span>●</span>
-                            </span>
+                        <div style={{ ...aiBubble, minWidth: '120px', overflowX: 'hidden' }}>
+                            {thoughtText ? (
+                                <div style={{ fontSize: '0.75rem', opacity: 0.85, fontStyle: 'italic', whiteSpace: 'pre-wrap', lineHeight: '1.4' }}>
+                                    {thoughtText}<span style={{ animation: 'wg-pulse 1.2s infinite' }}>_</span>
+                                </div>
+                            ) : (
+                                <span style={thinkingDots}>
+                                    <span>●</span><span>●</span><span>●</span>
+                                </span>
+                            )}
                         </div>
                     )}
                     <div ref={messagesEndRef} />

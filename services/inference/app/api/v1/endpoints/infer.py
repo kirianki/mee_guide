@@ -2,7 +2,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 
-from app.core.query_router import route_inference
+from app.core.query_router import route_inference_stream
+from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 
@@ -56,14 +57,17 @@ class InferenceResponse(BaseModel):
     cacheHit: bool = False
 
 
-@router.post("", response_model=InferenceResponse)
+@router.post("")
 async def run_inference_endpoint(request: InferenceRequest):
     """
-    Inference Pipeline — 5-step routing:
-    1. Redis exact hash cache
-    2. Rule-based pattern match (login/404/cookie/logout)
-    3. SII vector RAG (pgvector — TODO)
-    4/5. Full generative: OpenAI primary → Anthropic fallback
+    Inference Pipeline streams Pass 1 and yields Pass 2 via route_inference_stream.
     """
-    result = await route_inference(request.model_dump())
-    return InferenceResponse(**result)
+    return StreamingResponse(
+        route_inference_stream(request.model_dump()), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )

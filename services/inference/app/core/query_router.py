@@ -8,7 +8,7 @@ import re
 import redis.asyncio as aioredis
 
 from app.core.complexity import score_complexity, get_model_tier
-from app.core.providers import run_inference
+from app.core.providers import run_inference_stream
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -51,10 +51,10 @@ def _trim_snapshot(snapshot: dict) -> dict:
     return s
 
 
-async def route_inference(request: dict) -> dict:
+async def route_inference_stream(request: dict):
     """
     5-step routing decision tree.
-    Returns a normalised inference response dict.
+    Yields Server-Sent Events (JSON lines).
     """
     snapshot = request["snapshot"]
     session_id = request.get("sessionId", "anon")
@@ -62,8 +62,6 @@ async def route_inference(request: dict) -> dict:
     snapshot_hash = snapshot.get("snapshotHash") or snapshot.get("hash")
 
     # ── Step 1: Redis exact hash cache ───────────────────────────────────────
-    # If the user has a custom chat history, we MUST bypass the visual cache
-    # to generate their specific requested workflow instead of returning the summary.
     if snapshot_hash and not history:
         r = await get_redis()
         cached = await r.get(f"inference:hash:{snapshot_hash}")
@@ -71,17 +69,16 @@ async def route_inference(request: dict) -> dict:
             data = json.loads(cached)
             data["cacheHit"] = True
             data["provider"] = "cache"
-            return data
-
-    # ── Step 2: Verified publisher guide handled upstream in Guide Registry ───
-    # (not re-checked here; registry already returns guide steps)
+            yield json.dumps({"type": "result", "content": data, "provider": "cache"}) + "\n"
+            return
 
     # ── Step 3: Rule-based pattern matching ──────────────────────────────────
     url_path = snapshot.get("urlPath", "")
     for pattern, page_type in RULE_PATTERNS:
         if pattern.search(url_path):
             response = {**RULE_RESPONSES[page_type], "modelTier": "rule", "provider": "rule", "cacheHit": False}
-            return response
+            yield json.dumps({"type": "result", "content": response, "provider": "rule"}) + "\n"
+            return
 
     # ── Step 4 & 5: Complexity scoring → model tier → AI inference ───────────
     score = score_complexity(snapshot, len(history) // 2)
@@ -93,23 +90,31 @@ async def route_inference(request: dict) -> dict:
     # Trim snapshot to prevent token overload with the richer v2 payload
     trimmed = _trim_snapshot(snapshot)
 
+    provider = "none"
+    final_result_data = None
+
     try:
-        result, provider = await run_inference(trimmed, history, grounding, tier)
+        async for chunk in run_inference_stream(trimmed, history, grounding, tier):
+            yield chunk
+            data = json.loads(chunk)
+            if data.get("type") == "result":
+                final_result_data = data["content"]
+                provider = data.get("provider", "openai")
     except RuntimeError:
         # Both providers failed — return a graceful degraded response
-        result = {
+        final_result_data = {
             "guideTitle": "Guidance Unavailable",
             "steps": [{"stepIndex": 0, "instruction": "AI guidance is temporarily unavailable. Please try again shortly.", "tooltipText": None, "elementSelector": None, "completionTrigger": "manual", "completionSelector": None}],
             "errorDetected": None,
             "confidence": 0.0,
         }
         provider = "none"
+        yield json.dumps({"type": "result", "content": final_result_data, "provider": provider}) + "\n"
 
-    response = {**result, "modelTier": tier, "provider": provider, "cacheHit": False}
+    if final_result_data:
+        response = {**final_result_data, "modelTier": tier, "provider": provider, "cacheHit": False}
 
-    # Write to Redis cache if confidence is high enough (only for base guides, not custom chats)
-    if snapshot_hash and not history and result.get("confidence", 0) >= 0.75:
-        r = await get_redis()
-        await r.set(f"inference:hash:{snapshot_hash}", json.dumps(response), ex=86400)
-
-    return response
+        # Write to Redis cache if confidence is high enough (only for base guides, not custom chats)
+        if snapshot_hash and not history and final_result_data.get("confidence", 0) >= 0.75:
+            r = await get_redis()
+            await r.set(f"inference:hash:{snapshot_hash}", json.dumps(response), ex=86400)

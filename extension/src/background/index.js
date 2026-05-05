@@ -8,15 +8,21 @@ const API_BASE = typeof __API_BASE__ !== 'undefined' ? __API_BASE__ : 'http://lo
 const tabState = new Map();
 
 // ── Message Router ────────────────────────────────────────────────────────────
-browser.runtime.onMessage.addListener((message, sender) => {
+// ── Message Router ────────────────────────────────────────────────────────────
+browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { type, ...payload } = message;
     const tabId = sender.tab ? sender.tab.id : null;
 
     if (type === 'PAGE_LOADED') handlePageLoaded(tabId, payload);
     else if (type === 'PAGE_NAVIGATED') handlePageNavigated(tabId, payload);
     else if (type === 'STEP_COMPLETED') handleStepCompleted(tabId, payload);
-    else if (type === 'CHAT_MESSAGE') handleChatMessage(tabId, payload);
+    else if (type === 'CHAT_MESSAGE') {
+        handleChatMessage(tabId, { text: payload.text, history: payload.history, isSystem: false });
+        sendResponse({ success: true });
+    }
     else console.warn('[WebGuide BG] Unknown message type:', type);
+
+    return true; // Keep channel open for async responses if needed
 });
 
 async function handlePageLoaded(tabId, { url, domain, snapshotHash, snapshot }) {
@@ -133,9 +139,17 @@ function handleStepCompleted(tabId, { stepIndex }) {
     if (s) tabState.set(tabId, { ...s, spaState: { completedSteps: [...(s.spaState?.completedSteps || []), stepIndex] } });
 }
 
-async function handleChatMessage(tabId, { text, isSystem = false }) {
-    const state = tabState.get(tabId);
-    if (!state) return;
+async function handleChatMessage(tabId, { text, history = [], isSystem = false }) {
+    let state = tabState.get(tabId);
+    if (!state) {
+        try {
+            const res = await browser.tabs.sendMessage(tabId, { type: 'REQUEST_SNAPSHOT' });
+            if (res?.snapshot) {
+                state = { snapshot: res.snapshot, lastSnapshot: res.snapshot, conversationHistory: [], chatHistory: [], pageChain: [] };
+                tabState.set(tabId, state);
+            } else return;
+        } catch (e) { return; }
+    }
 
     // Handle save workflow trigger from UI
     if (text === '__SAVE_WORKFLOW__') {
@@ -161,23 +175,18 @@ async function handleChatMessage(tabId, { text, isSystem = false }) {
         return;
     }
 
-    // Add to local history
-    const history = [...(state.conversationHistory || [])];
-
-    // Only show user messages in the history we return to UI, 
-    // but pass everything to the AI.
+    const finalHistory = [...history];
     if (!isSystem) {
-        history.push({ role: 'user', content: text });
+        finalHistory.push({ role: 'user', content: text });
     } else {
-        // System context injection
-        history.push({ role: 'user', content: text, hidden: true });
+        finalHistory.push({ role: 'user', content: text, hidden: true });
     }
 
     // Request fresh inference with history
     const response = await fetchInference({
         snapshot: state.snapshot,
         sessionId: String(tabId),
-        conversationHistory: history,
+        conversationHistory: finalHistory,
     });
 
     if (response) {
@@ -195,10 +204,12 @@ async function handleChatMessage(tabId, { text, isSystem = false }) {
             requiresInference: false,
         };
 
-        history.push({ role: 'assistant', content: `Updated guide: ${response.guideTitle}` });
+        const assistantMsg = { role: 'assistant', content: response.narrative || response.guideTitle };
+        const updatedHistory = [...finalHistory, assistantMsg];
+
         tabState.set(tabId, {
             ...state,
-            conversationHistory: history.slice(-12),
+            conversationHistory: updatedHistory.slice(-12),
             response: guideResponse,
         });
 
@@ -236,7 +247,7 @@ async function fetchGuides({ domain, url, snapshotHash }) {
 
 async function fetchInference({ snapshot, sessionId, conversationHistory = [], snapshotHash }) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000); // 20s hard timeout
+    const timeout = setTimeout(() => controller.abort(), 120000); // 120s extended timeout for full reasoning loop
 
     try {
         const res = await fetch(`${API_BASE}/inference`, {
@@ -251,7 +262,42 @@ async function fetchInference({ snapshot, sessionId, conversationHistory = [], s
             signal: controller.signal,
         });
         if (!res.ok) throw new Error(`Inference API ${res.status}`);
-        return await res.json();
+
+        // Use ReadableStream to pull streaming server-sent JSONL strings (SSE framework)
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let inferenceResult = null;
+        let buf = "";
+
+        // Notify content tab that reasoning engine has initialized
+        const tabId = Number(sessionId) || sessionId;
+        sendToTab(tabId, { type: 'THOUGHT_START' });
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop() || "";
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const msg = JSON.parse(line);
+                    if (msg.type === 'thought') {
+                        sendToTab(tabId, { type: 'THOUGHT_CHUNK', text: msg.content });
+                    } else if (msg.type === 'result') {
+                        inferenceResult = msg.content;
+                    }
+                } catch (e) {
+                    console.warn('[WebGuide BG] SSE Parse skipped:', line);
+                }
+            }
+        }
+
+        sendToTab(tabId, { type: 'THOUGHT_DONE' });
+        return inferenceResult;
     } catch (err) {
         console.error('[WebGuide BG] Inference failed:', err);
         return null;
