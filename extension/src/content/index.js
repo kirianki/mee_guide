@@ -10,7 +10,9 @@ let autoProgressListeners = []; // Cleanup refs
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 (async () => {
-    const { snapshot, hash } = await extractSnapshot();
+    const result = await extractSnapshot();
+    if (!result) return;
+    const { snapshot, hash } = result;
     if (!sidebarMounted) {
         mountSidebar();
         sidebarMounted = true;
@@ -36,7 +38,9 @@ const observer = new MutationObserver(debounce(async () => {
         hideSpotlight();
         clearAutoProgressListeners();
 
-        const { snapshot, hash } = await extractSnapshot();
+        const result = await extractSnapshot();
+        if (!result) return;
+        const { snapshot, hash } = result;
         browser.runtime.sendMessage({
             type: 'PAGE_LOADED',
             url: location.pathname,
@@ -76,7 +80,7 @@ browser.runtime.onMessage.addListener((message) => {
     }
 
     if (message.type === 'HIGHLIGHT_ELEMENT') {
-        showSpotlight(message.selector, message.label);
+        showSpotlight(message.selector, null, message.label);
     }
 
     if (message.type === 'REQUEST_SNAPSHOT') {

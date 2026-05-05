@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "WebGuide",
+    "name": "WebGuide 1.3",
     "description": "AI-powered navigation assistance on any website.",
-    "version": "0.1.0",
+    "version": "1.3.0",
     "permissions": [
         "storage",
         "activeTab",
